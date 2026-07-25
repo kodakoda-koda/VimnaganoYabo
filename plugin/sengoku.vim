@@ -517,6 +517,7 @@ func! s:OnResize() abort
 endfunc
 
 func! s:CloseUI() abort
+  call s:ClosePopups()
   if exists('s:save_ch')
     execute 'set cmdheight=' . s:save_ch
     unlet s:save_ch
@@ -573,8 +574,8 @@ func! s:BoxLines(pi, active) abort
   return [l1, l2, l3]
 endfunc
 
-func! s:SummaryLines() abort
-  " 生存大名を国数降順で表示 (幅に収まるよう複数行)
+func! s:PowerTags() abort
+  " 生存大名を国数降順のタグ列にする
   let alive = []
   for i in range(len(s:clans))
     let n = len(s:ClanProvs(i))
@@ -583,21 +584,87 @@ func! s:SummaryLines() abort
     endif
   endfor
   call sort(alive, {a, b -> b.n - a.n})
-  " 折り返し幅はウィンドウの実幅に追従 (nowrapでも情報が切れないように)
-  let limit = max([24, min([s:CELLW * s:GRIDC, winwidth(0) - 1])])
-  let lines = []
-  let cur = '勢力: '
+  let tags = []
   for e in alive
     let tag = printf('%s%d', s:clans[e.i].abbr, e.n)
     if e.i == s:player | let tag = '[' . tag . ']' | endif
-    if strdisplaywidth(cur) > 6 && strdisplaywidth(cur . tag . ' ') > limit
-      call add(lines, cur)
-      let cur = '      '
-    endif
-    let cur .= tag . ' '
+    call add(tags, tag)
   endfor
-  call add(lines, cur)
+  return tags
+endfunc
+
+func! s:PowerContent(inner) abort
+  " タグ列を幅innerで折り返した行リスト
+  let lines = []
+  let cur = ''
+  for tag in s:PowerTags()
+    if !empty(cur) && strdisplaywidth(cur . ' ' . tag) > a:inner
+      call add(lines, cur)
+      let cur = ''
+    endif
+    let cur = empty(cur) ? tag : cur . ' ' . tag
+  endfor
+  if !empty(cur)
+    call add(lines, cur)
+  endif
   return lines
+endfunc
+
+func! s:TruncW(str, w) abort
+  let r = a:str
+  while strdisplaywidth(r) > a:w
+    let r = strcharpart(r, 0, strchars(r) - 1)
+  endwhile
+  return r
+endfunc
+
+func! s:UseFloat() abort
+  return has('nvim') && exists('*nvim_open_win')
+endfunc
+
+func! s:ClosePopups() abort
+  if exists('s:popups')
+    for st in values(s:popups)
+      if s:UseFloat() && get(st, 'win', -1) != -1 && nvim_win_is_valid(st.win)
+        silent! call nvim_win_close(st.win, 1)
+      endif
+      let st.win = -1
+    endfor
+  endif
+endfunc
+
+func! s:ShowPopup(key, row, col, content, width, title) abort
+  " マップに重ねるフローティングウィンドウを作成/更新する (Neovim)
+  if !s:UseFloat()
+    return
+  endif
+  if !exists('s:popups')
+    let s:popups = {}
+  endif
+  let st = get(s:popups, a:key, {})
+  if empty(st) || !bufexists(get(st, 'buf', -1))
+    let st = {'buf': nvim_create_buf(v:false, v:true), 'win': -1}
+  endif
+  let disp = map(copy(a:content), 's:TruncW(" " . v:val, a:width - 1)')
+  call nvim_buf_set_lines(st.buf, 0, -1, v:false, disp)
+  let h = max([1, len(disp)])
+  " 画面内に収まる位置へクランプ (フォントが大きくても必ず見える)
+  let row = max([0, min([a:row, winheight(0) - h - 2])])
+  let cfg = {'relative': 'win', 'win': win_getid(), 'row': row, 'col': a:col,
+        \ 'width': a:width, 'height': h, 'style': 'minimal',
+        \ 'border': 'single', 'title': a:title, 'focusable': v:false, 'zindex': 60}
+  try
+    if st.win != -1 && nvim_win_is_valid(st.win)
+      call nvim_win_set_config(st.win, cfg)
+    else
+      let st.win = nvim_open_win(st.buf, v:false, cfg)
+      call setwinvar(st.win, '&winhighlight', 'NormalFloat:Normal,FloatBorder:Title')
+    endif
+  catch
+    silent! call remove(cfg, 'title')
+    let st.win = nvim_open_win(st.buf, v:false, cfg)
+  endtry
+  let s:popups[a:key] = st
 endfunc
 
 func! s:Render(active) abort
@@ -606,7 +673,6 @@ func! s:Render(active) abort
   let lines = []
   call add(lines, printf('■ 戦国風雲録  %d年%2d月  〜Vimで天下統一〜  (全%d国)',
         \ s:year, s:month, len(s:prov)))
-  call extend(lines, s:SummaryLines())
   if s:player >= 0
     let inames = map(copy(s:cstate[s:player].items), 's:items[v:val].name')
     let anames = map(s:AllyList(s:player), 's:clans[v:val].name')
@@ -643,15 +709,37 @@ func! s:Render(active) abort
     endfor
   endfor
   call add(lines, '(数字=兵数/百人  >=行動中  *=委任中  隣接は出陣メニュー参照)')
-  call add(lines, repeat('-', s:CELLW * s:GRIDC))
-  let tail = len(s:log) > s:LOGN ? s:log[-s:LOGN :] : s:log
-  for m in tail
-    call add(lines, m)
-  endfor
+  if !s:UseFloat()
+    " フロート非対応環境: 枠付きパネルとログをバッファ内に描画
+    let inner = max([24, min([s:CELLW * s:GRIDC - 2, winwidth(0) - 6])])
+    let title = '-- 勢力 '
+    call add(lines, '+' . title . repeat('-', inner - strdisplaywidth(title) + 1) . '+')
+    for pl in s:PowerContent(inner)
+      call add(lines, '|' . s:PadR(' ' . pl, inner + 1) . '|')
+    endfor
+    call add(lines, '+' . repeat('-', inner + 1) . '+')
+    call add(lines, repeat('-', s:CELLW * s:GRIDC))
+    let tail = len(s:log) > s:LOGN ? s:log[-s:LOGN :] : s:log
+    for m in tail
+      call add(lines, m)
+    endfor
+  endif
   setlocal modifiable
   silent %delete _
   call setline(1, lines)
   setlocal nomodifiable
+  if s:UseFloat()
+    " 勢力: マップ左上の海域に重ねて表示
+    let pw = max([24, min([34, winwidth(0) - 4])])
+    call s:ShowPopup('power', 2, 1, s:PowerContent(pw - 3), pw, ' 勢力 ')
+    " 戦況: 自家の行動結果や天下の出来事を画面下部に重ねて表示
+    let lw = max([24, min([s:CELLW * s:GRIDC - 2, winwidth(0) - 4])])
+    let tail = len(s:log) > 5 ? s:log[-5 :] : copy(s:log)
+    if empty(tail)
+      let tail = ['(まだ出来事はない)']
+    endif
+    call s:ShowPopup('log', winheight(0) - len(tail) - 2, 1, tail, lw, ' 戦況 ')
+  endif
 endfunc
 
 func! s:Pause(msg) abort
@@ -989,6 +1077,7 @@ endfunc
 
 func! s:SiegeRender(active) abort
   let s:ui_mode = 'siege'
+  call s:ClosePopups()
   let t = s:prov[s:bt.to]
   let lines = []
   call add(lines, printf('■ %s城 攻防戦  %d日目/%d日', t.name, s:bt.day, s:MAXDAY))
@@ -2264,5 +2353,19 @@ func! sengoku#SelfTest() abort
   call s:OpenBuf()
   call s:Render(0)
   echom 'RENDER OK: ' . line('$') . ' lines'
+  if s:UseFloat()
+    for key in ['power', 'log']
+      let st = get(get(s:, 'popups', {}), key, {})
+      if empty(st) || get(st, 'win', -1) == -1 || !nvim_win_is_valid(st.win)
+        echoerr 'POPUP FAIL: ' . key . ' ポップアップが表示されていない'
+        return
+      endif
+      if empty(join(nvim_buf_get_lines(st.buf, 0, -1, v:false), ''))
+        echoerr 'POPUP FAIL: ' . key . ' の中身が空'
+        return
+      endif
+    endfor
+    echom 'POPUP OK: 勢力+戦況ポップアップをマップ上に表示'
+  endif
   call s:CloseUI()
 endfunc
