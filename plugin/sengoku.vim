@@ -502,6 +502,18 @@ func! s:OpenBuf() abort
   setlocal nonumber norelativenumber nolist nowrap
   setlocal nocursorline signcolumn=no
   call s:SetupSyntax()
+  " ウィンドウ/フォントサイズ変更時は即座に折り返しを組み直す
+  augroup SengokuResize
+    autocmd! * <buffer>
+    autocmd VimResized <buffer> call s:OnResize()
+  augroup END
+endfunc
+
+func! s:OnResize() abort
+  if get(s:, 'ui_mode', '') ==# 'map'
+    call s:Render(get(s:, 'last_active', -1))
+    redraw
+  endif
 endfunc
 
 func! s:CloseUI() abort
@@ -572,7 +584,7 @@ func! s:SummaryLines() abort
   endfor
   call sort(alive, {a, b -> b.n - a.n})
   " 折り返し幅はウィンドウの実幅に追従 (nowrapでも情報が切れないように)
-  let limit = max([40, min([s:CELLW * s:GRIDC, winwidth(0) - 1])])
+  let limit = max([24, min([s:CELLW * s:GRIDC, winwidth(0) - 1])])
   let lines = []
   let cur = '勢力: '
   for e in alive
@@ -589,6 +601,8 @@ func! s:SummaryLines() abort
 endfunc
 
 func! s:Render(active) abort
+  let s:ui_mode = 'map'
+  let s:last_active = a:active
   let lines = []
   call add(lines, printf('■ 戦国風雲録  %d年%2d月  〜Vimで天下統一〜  (全%d国)',
         \ s:year, s:month, len(s:prov)))
@@ -601,7 +615,7 @@ func! s:Render(active) abort
     let part2 = printf('茶器[%s] 同盟[%s]',
           \ empty(inames) ? 'なし' : join(inames, '・'),
           \ empty(anames) ? 'なし' : join(anames, '・'))
-    let limit = max([40, min([s:CELLW * s:GRIDC, winwidth(0) - 1])])
+    let limit = max([24, min([s:CELLW * s:GRIDC, winwidth(0) - 1])])
     if strdisplaywidth(part1 . ' ' . part2) > limit
       call add(lines, part1)
       call add(lines, '      ' . part2)
@@ -974,6 +988,7 @@ func! s:BtFireTargets(u) abort
 endfunc
 
 func! s:SiegeRender(active) abort
+  let s:ui_mode = 'siege'
   let t = s:prov[s:bt.to]
   let lines = []
   call add(lines, printf('■ %s城 攻防戦  %d日目/%d日', t.name, s:bt.day, s:MAXDAY))
