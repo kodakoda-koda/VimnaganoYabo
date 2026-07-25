@@ -571,12 +571,14 @@ func! s:SummaryLines() abort
     endif
   endfor
   call sort(alive, {a, b -> b.n - a.n})
+  " 折り返し幅はウィンドウの実幅に追従 (nowrapでも情報が切れないように)
+  let limit = max([40, min([s:CELLW * s:GRIDC, winwidth(0) - 1])])
   let lines = []
   let cur = '勢力: '
   for e in alive
     let tag = printf('%s%d', s:clans[e.i].abbr, e.n)
     if e.i == s:player | let tag = '[' . tag . ']' | endif
-    if strdisplaywidth(cur . tag . ' ') > s:CELLW * s:GRIDC
+    if strdisplaywidth(cur) > 6 && strdisplaywidth(cur . tag . ' ') > limit
       call add(lines, cur)
       let cur = '      '
     endif
@@ -594,10 +596,18 @@ func! s:Render(active) abort
   if s:player >= 0
     let inames = map(copy(s:cstate[s:player].items), 's:items[v:val].name')
     let anames = map(s:AllyList(s:player), 's:clans[v:val].name')
-    call add(lines, printf('自家: 官位[%s] 文化%d 茶器[%s] 同盟[%s]',
-          \ s:RANKS[s:cstate[s:player].rank], s:Culture(s:player),
+    let part1 = printf('自家: 官位[%s] 文化%d',
+          \ s:RANKS[s:cstate[s:player].rank], s:Culture(s:player))
+    let part2 = printf('茶器[%s] 同盟[%s]',
           \ empty(inames) ? 'なし' : join(inames, '・'),
-          \ empty(anames) ? 'なし' : join(anames, '・')))
+          \ empty(anames) ? 'なし' : join(anames, '・'))
+    let limit = max([40, min([s:CELLW * s:GRIDC, winwidth(0) - 1])])
+    if strdisplaywidth(part1 . ' ' . part2) > limit
+      call add(lines, part1)
+      call add(lines, '      ' . part2)
+    else
+      call add(lines, part1 . ' ' . part2)
+    endif
   endif
   call add(lines, '')
   let grid = {}
