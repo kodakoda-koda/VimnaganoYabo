@@ -669,6 +669,53 @@ func! s:PowerContent(inner) abort
   return lines
 endfunc
 
+func! s:PowerOverlap() abort
+  " 勢力パネルの矩形が国の箱と重なっていれば説明文を返す (重なりなしなら空文字)
+  let st = get(get(s:, 'popups', {}), 'power', {})
+  if empty(st) || get(st, 'win', -1) == -1 || !nvim_win_is_valid(st.win)
+    return '勢力ポップアップが表示されていない'
+  endif
+  let cfg = nvim_win_get_config(st.win)
+  let prow = float2nr(cfg.row) - 1
+  let pcol = float2nr(cfg.col) - 1
+  let ph = cfg.height + 2
+  let pw = cfg.width + 2
+  let base = get(s:, 'map_top', 3)
+  for p in s:prov
+    let br = base + p.gr * 3
+    let bc = p.gc * s:CELLW
+    if br < prow + ph && br + 3 > prow && bc < pcol + pw && bc + s:CELLW > pcol
+      return printf('勢力パネル(行%d-%d 桁%d-%d)が %s の箱(行%d-%d 桁%d-%d)に被っている',
+            \ prow, prow + ph - 1, pcol, pcol + pw - 1,
+            \ p.name, br, br + 2, bc, bc + s:CELLW - 1)
+    endif
+  endfor
+  return ''
+endfunc
+
+func! s:PowerBox() abort
+  " 勢力パネルを重ねられる空き領域(マップ上部の海域)を求める。
+  " 上から gr 行目までを使う場合、幅は「その範囲で最も左に国がある位置」まで。
+  " 行数×幅が最大になる組み合わせを選ぶ。
+  let best = {'rows': 1, 'width': s:CELLW * s:GRIDC}
+  let barea = -1
+  let width = s:CELLW * s:GRIDC
+  for gr in range(s:GRIDR)
+    let minc = s:GRIDC
+    for p in s:prov
+      if p.gr == gr && p.gc < minc | let minc = p.gc | endif
+    endfor
+    let width = min([width, minc * s:CELLW])
+    if width < 26 | break | endif
+    let area = (gr + 1) * 3 * width
+    if area > barea
+      let barea = area
+      let best = {'rows': gr + 1, 'width': width}
+    endif
+  endfor
+  return best
+endfunc
+
 func! s:TruncW(str, w) abort
   let r = a:str
   while strdisplaywidth(r) > a:w
@@ -757,6 +804,8 @@ func! s:Render(active) abort
     endif
   endif
   call add(lines, '')
+  " マップ本体の開始行 (勢力パネルをここに合わせて重ねる)
+  let s:map_top = len(lines)
   let grid = {}
   for i in range(len(s:prov))
     let grid[s:prov[i].gr . ',' . s:prov[i].gc] = i
@@ -796,9 +845,17 @@ func! s:Render(active) abort
   call setline(1, lines)
   setlocal nomodifiable
   if s:UseFloat()
-    " 勢力: マップ左上の海域に重ねて表示
-    let pw = max([24, min([34, winwidth(0) - 4])])
-    call s:ShowPopup('power', 2, 1, s:PowerContent(pw - 3), pw, ' 勢力 ')
+    " 勢力: マップ上部の空いている海域に、国の箱へ被らない幅と高さで重ねる
+    let box = s:PowerBox()
+    let pw = max([24, min([box.width - 2, winwidth(0) - 4])])
+    let pc = s:PowerContent(pw - 3)
+    let pmax = max([1, box.rows * 3 - 2])
+    if len(pc) > pmax
+      " 収まらない場合だけ最終行に続きがあることを示す (通常は起こらない)
+      let pc = pc[: pmax - 1]
+      let pc[-1] = s:TruncW(pc[-1], pw - 5) . ' …'
+    endif
+    call s:ShowPopup('power', s:map_top + 1, 1, pc, pw, ' 勢力 ')
     " 戦況: 自家の行動結果や天下の出来事を画面下部に重ねて表示
     let lw = max([24, min([s:CELLW * s:GRIDC - 2, winwidth(0) - 4])])
     let tail = len(s:log) > 5 ? s:log[-5 :] : copy(s:log)
@@ -2380,6 +2437,17 @@ func! sengoku#SelfTest() abort
     let ngens += len(s:gens[ci])
   endfor
   echom printf('GEN OK: 全%d家 x 8人 = %d武将', len(s:clans), ngens)
+  " 初期状態(32家すべて健在)は勢力パネルが最も縦に伸びる最悪ケースなので先に検査
+  let s:player = -1
+  call s:OpenBuf()
+  call s:Render(0)
+  if s:UseFloat()
+    let ov = s:PowerOverlap()
+    if !empty(ov)
+      echoerr 'POPUP FAIL(初期状態 32家): ' . ov
+      return
+    endif
+  endif
   " 全AIで36ヶ月
   let s:player = -1
   for i in range(36)
@@ -2440,7 +2508,13 @@ func! sengoku#SelfTest() abort
         return
       endif
     endfor
-    echom 'POPUP OK: 勢力+戦況ポップアップをマップ上に表示'
+    " 勢力パネルが国の箱に被っていないことを確認する
+    let ov = s:PowerOverlap()
+    if !empty(ov)
+      echoerr 'POPUP FAIL: ' . ov
+      return
+    endif
+    echom 'POPUP OK: 勢力+戦況を国の箱に被らず表示 (32家/残存家の両方で検査済)'
   endif
   call s:CloseUI()
 endfunc
